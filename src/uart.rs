@@ -54,18 +54,31 @@ impl UART {
 
     pub fn read_line<'a>(&mut self, buf: &'a mut [u8], echo: bool) -> &'a [u8] {
         let mut max_len = buf.len();
-        let mut count = 0;
+        let mut count: usize = 0;
         while max_len > 0 {
             let cur = self.read_byte();
             if cur == b'\r' || cur == b'\n' {
                 break;
             }
-            if echo {
-                self.write_byte(cur);
+            match cur {
+                b'\r' | b'\n' => break,
+                // delete and backspace
+                b'\x7f' | b'\x08' => {
+                    if echo && count > 0 {
+                        self.write_bytes(b"\x08\x20\x08");
+                    }
+                    count = count.checked_sub(1).unwrap_or(0);
+                    max_len = max_len.checked_add(1).unwrap_or(0);
+                }
+                _ => {
+                    if echo {
+                        self.write_byte(cur);
+                    }
+                    buf[count] = cur;
+                    count += 1;
+                    max_len -= 1;
+                }
             }
-            buf[count] = cur;
-            count += 1;
-            max_len -= 1;
         }
         if echo {
             self.write_byte(b'\n');
