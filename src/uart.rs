@@ -3,31 +3,44 @@ use core::fmt::Write;
 use core::ptr;
 use core::str;
 
-use crate::gic::GIC;
+const AUX_ENABLE:     *mut u32 = 0x3F215004 as _;
+const AUX_MU_IO:      *mut u32 = 0x3F215040 as _;
+const AUX_MU_IER:     *mut u32 = 0x3F215044 as _;
+const AUX_MU_IIR:     *mut u32 = 0x3F215048 as _;
+const AUX_MU_LCR:     *mut u32 = 0x3F21504C as _;
+const AUX_MU_MCR:     *mut u32 = 0x3F215050 as _;
+const AUX_MU_LSR:     *mut u32 = 0x3F215054 as _;
+const AUX_MU_MSR:     *mut u32 = 0x3F215058 as _;
+const AUX_MU_SCRATCH: *mut u32 = 0x3F21505C as _;
+const AUX_MU_CNTL:    *mut u32 = 0x3F215060 as _;
+const AUX_MU_STAT:    *mut u32 = 0x3F215064 as _;
+const AUX_MU_BAUD:    *mut u32 = 0x3F215068 as _;
 
-pub struct UART(*mut u32, GIC);
-unsafe impl Send for UART {}
-unsafe impl Sync for UART {}
-
-pub const IRQ: u32 = 0x21;
+pub struct UART();
 
 impl UART {
-    pub const unsafe fn new(base_addr: *mut u32, irq: GIC) -> UART {
-        UART(base_addr, irq)
+    pub const unsafe fn new() -> UART {
+        UART()
+    }
+
+    pub fn init(&mut self) {
+        unsafe {
+            ptr::write_volatile(AUX_ENABLE, ptr::read_volatile(AUX_ENABLE) | 1);
+            ptr::write_volatile(AUX_MU_CNTL, 0);
+            ptr::write_volatile(AUX_MU_LCR, 3);       // 8 bits
+            ptr::write_volatile(AUX_MU_MCR, 0);
+            ptr::write_volatile(AUX_MU_IER, 0);
+            ptr::write_volatile(AUX_MU_IIR, 0xc6);    // disable interrupts
+            ptr::write_volatile(AUX_MU_BAUD, 270);    // 115200 baud
+
+            ptr::write_volatile(AUX_MU_CNTL, 3); // enable Tx, Rx
+        }
     }
 
     pub fn write_byte(&mut self, byte: u8) {
         unsafe {
-            ptr::write_volatile(self.0, byte as u32);
-            let orig_mask = ptr::read(self.0.offset(0x38 / 4));
-            ptr::write_volatile(self.0.offset(0x38 / 4), orig_mask | (1 << 3));
-            self.1.enable();
-            while ptr::read_volatile(self.0.offset(0x18 / 4)) & 1 << 3 != 0 {
-                asm!("wfi");
-                self.1.clear();
-            }
-            self.1.disable();
-            ptr::write_volatile(self.0.offset(0x38 / 4), orig_mask);
+            while ptr::read_volatile(AUX_MU_LSR) & 0x20 == 0 {}
+            ptr::write_volatile(AUX_MU_IO, byte as u32);
         }
     }
 
@@ -39,51 +52,9 @@ impl UART {
 
     pub fn read_byte(&mut self) -> u8 {
         unsafe {
-            let orig_mask = ptr::read(self.0.offset(0x38 / 4));
-            ptr::write_volatile(self.0.offset(0x38 / 4), orig_mask | (1 << 4));
-            self.1.enable();
-            while ptr::read_volatile(self.0.offset(0x18 / 4)) & (1 << 4) != 0 {
-                asm!("wfi");
-                self.1.clear();
-            }
-            self.1.disable();
-            ptr::write_volatile(self.0.offset(0x38 / 4), orig_mask);
-            ptr::read_volatile(self.0) as u8
+            while ptr::read_volatile(AUX_MU_LSR) & 0x01 == 0 {}
+            ptr::read_volatile(AUX_MU_IO) as u8
         }
-    }
-
-    pub fn read_line<'a>(&mut self, buf: &'a mut [u8], echo: bool) -> &'a [u8] {
-        let mut max_len = buf.len();
-        let mut count: usize = 0;
-        while max_len > 0 {
-            let cur = self.read_byte();
-            if cur == b'\r' || cur == b'\n' {
-                break;
-            }
-            match cur {
-                b'\r' | b'\n' => break,
-                // delete and backspace
-                b'\x7f' | b'\x08' => {
-                    if echo && count > 0 {
-                        self.write_bytes(b"\x08\x20\x08");
-                    }
-                    count = count.checked_sub(1).unwrap_or(0);
-                    max_len = max_len.checked_add(1).unwrap_or(0);
-                }
-                _ => {
-                    if echo {
-                        self.write_byte(cur);
-                    }
-                    buf[count] = cur;
-                    count += 1;
-                    max_len -= 1;
-                }
-            }
-        }
-        if echo {
-            self.write_byte(b'\n');
-        }
-        &buf[0..count]
     }
 }
 
